@@ -4,7 +4,7 @@ Plugin Name: Same Category Posts
 Plugin URI: https://wordpress.org/plugins/same-category-posts/
 Description: Adds a widget that shows the most recent posts from a single category.
 Author: Daniel Floeter
-Version: 1.1.18
+Version: 1.1.20
 Author URI: https://profiles.wordpress.org/kometschuh/
 */
 
@@ -13,7 +13,7 @@ namespace sameCategoryPosts;
 // Don't call the file directly
 if ( !defined( 'ABSPATH' ) ) exit;
 
-define( 'SAME_CATEGORY_POSTS_VERSION', "1.1.16");
+define( 'SAME_CATEGORY_POSTS_VERSION', "1.1.20");
 
 
 /**
@@ -486,6 +486,11 @@ class Widget extends \WP_Widget {
 				}
 			}
 		}
+		
+		// If the current post has no terms for the selected taxonomy, don't render the widget.
+		if ( empty( $categories ) || is_wp_error( $categories ) ) {
+    	return;
+		}
 
 		// Excerpt length filter
 		if ( isset($instance["excerpt_length"]) && $instance["excerpt_length"] > 0 ) {
@@ -631,7 +636,7 @@ class Widget extends \WP_Widget {
 							} else 															// no category placeholder is used
 								$linkList = '<a href="' . get_category_link( $categories[0] ) . '">'. $instance['title'] . '</a>';
 						}
-						echo htmlspecialchars_decode(apply_filters('widget_title',$linkList));
+						echo wp_kses_post(apply_filters('widget_title',$linkList));
 					} else {
 						$categoryNames = "";
 						if ($categories) {
@@ -657,7 +662,7 @@ class Widget extends \WP_Widget {
 							else
 								$categoryNames = $instance['title'];
 						}
-						echo htmlspecialchars_decode(apply_filters('widget_title',$categoryNames));
+						echo wp_kses_post(apply_filters('widget_title',$categoryNames));
 					}
 					echo $after_title;
 				}
@@ -699,7 +704,7 @@ class Widget extends \WP_Widget {
 				foreach($widgetHTML as $val) {
 					// widget title
 					$haveItemHTML = false;
-					$ret = $before_title . htmlspecialchars_decode(apply_filters('widget_title',isset($val['title'])?$val['title']:"")) . $after_title;
+					$ret = $before_title . wp_kses_post(apply_filters('widget_title',isset($val['title'])?$val['title']:"")) . $after_title;
 					$count = 1;
 					$num_per_cat = (isset($instance['num_per_cate'])&&$instance['num_per_cate']!=0?($instance['num_per_cate']):99999);
 					foreach($val as $key) {

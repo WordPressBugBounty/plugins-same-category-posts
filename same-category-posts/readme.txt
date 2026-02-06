@@ -3,8 +3,8 @@ Contributors: kometschuh, mkrdip
 Donate link: https://wordpress.org/support/plugin/same-category-posts/reviews/?filter=5
 Tags: related posts, related, custom post type, products, events
 Requires at least: 3.0
-Tested up to: 6.6
-Stable tag: 1.1.18
+Tested up to: 6.9
+Stable tag: 1.1.20
 License: GPLv2 or later 
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -100,6 +100,12 @@ To multiselect or clear terms in the "exclude"-text area hold CTRL-key + mouse c
 4. The widget configuration dialog.
 
 == Changelog ==
+
+= 1.1.20 - Jan 01 2026  =
+* Security scan by Wordfence
+
+= 1.1.19 - Dec 10 2025  =
+* Prevent widget rendering for posts without terms
 
 = 1.1.18 - March 01 2023  =
 * Cleanup for anchor title
