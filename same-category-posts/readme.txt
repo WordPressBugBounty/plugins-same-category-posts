@@ -2,9 +2,10 @@
 Contributors: kometschuh, mkrdip
 Donate link: https://wordpress.org/support/plugin/same-category-posts/reviews/?filter=5
 Tags: related posts, related, custom post type, products, events
-Requires at least: 3.0
-Tested up to: 6.9
-Stable tag: 1.1.20
+Requires at least: 6.3
+Tested up to: 7.1
+Requires PHP: 7.2
+Stable tag: 1.2.0
 License: GPLv2 or later 
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -12,7 +13,7 @@ Show posts related to the current category or other custom post types.
 
 == Description ==
 
-Same Category Posts shows a list of related posts with a same Post Type to the current post. The widget is only shown on single post pages. Forked from [Related Posts Widget](https://wordpress.org/plugins/related-posts-widget).
+Same Category Posts shows a list of related posts with a same Post Type to the current post. It comes as a classic widget and as a block, both with the same options and the same output. The list is only shown on single post pages and on archive pages. Forked from [Related Posts Widget](https://wordpress.org/plugins/related-posts-widget).
 
 = Tip Top Press =
 We're [Tip Top Press](http://tiptoppress.com/) and create widgets for Wordpress. If you want to know about what we're working on and you are interested in backgrounds then you can read all newes storys on our [blog](http://tiptoppress.com/blog/?utm_source=wp.org&utm_medium=readme.txt&utm_campaign=same+category+posts).
@@ -40,7 +41,7 @@ We're [Tip Top Press](http://tiptoppress.com/) and create widgets for Wordpress.
 * Option to show the post excerpt and how long (in words).
 * Option change excerpt 'more' text.
 * Option to show the post date, author and comment count.
-* Multiple widgets.
+* Block with the same options as the widget, with a live preview in the editor.
 
 = Placeholder =
 
@@ -90,7 +91,10 @@ WordPress Codex: [Excerpt, automatic excerpt, and teaser](http://codex.wordpress
 Enable the check box "Make widget title link".
 
 = Exclude (-terms) text area =
-To multiselect or clear terms in the "exclude"-text area hold CTRL-key + mouse click
+To multiselect or clear terms in the "exclude"-text area hold CTRL-key + mouse click. In the block, type or pick the terms in the "Excluded terms" field and remove them with the x on each entry.
+
+= Why does the block show nothing in the editor? =
+The list is built from the terms the post is saved with. A post that has no category yet, or one whose only category is excluded, has nothing to relate to, so the block stays empty -- as it would on the front end.
 
 == Screenshots ==
 
@@ -100,6 +104,10 @@ To multiselect or clear terms in the "exclude"-text area hold CTRL-key + mouse c
 4. The widget configuration dialog.
 
 == Changelog ==
+
+= 1.2.0 - September 02 2026  =
+* Gutenberg Block support
+* Bugfix Excerpt length filter stayed active, sort order, PHP 8 warnings
 
 = 1.1.20 - Jan 01 2026  =
 * Security scan by Wordfence

@@ -2,22 +2,33 @@
 /*
 Plugin Name: Same Category Posts
 Plugin URI: https://wordpress.org/plugins/same-category-posts/
-Description: Adds a widget that shows the most recent posts from a single category.
+Description: Show posts related to the current category or other custom post types, as a widget and as a block.
 Author: Daniel Floeter
-Version: 1.1.20
+Version: 1.2.0
 Author URI: https://profiles.wordpress.org/kometschuh/
+Requires at least: 6.3
+Requires PHP: 7.2
+Text Domain: same-posts
 */
 
-namespace sameCategoryPosts;
+namespace samePosts;
 
 // Don't call the file directly
 if ( !defined( 'ABSPATH' ) ) exit;
 
-define( 'SAME_CATEGORY_POSTS_VERSION', "1.1.20");
+define( 'SAME_CATEGORY_POSTS_VERSION', "1.2.0");
 
+require_once __DIR__ . '/includes/image-size.php';
+require_once __DIR__ . '/same-posts-block.php';
+require_once __DIR__ . '/same-posts-rest.php';
 
 /**
  * Register our styles
+ *
+ * Hooked to `enqueue_block_assets`. `enqueue_block_assets`
+ * loads on both the front end and the editor, so the CSS -- including the
+ * "same-category-post-css-cropping" cropping rules -- is available in both
+ * places.
  *
  * @return void
  */
@@ -25,7 +36,7 @@ function same_category_posts_styles() {
 	wp_register_style( 'same-category-posts', plugins_url( 'same-category-posts/same-category-posts.css' ) );
 	wp_enqueue_style( 'same-category-posts' );
 }
-add_action( 'wp_enqueue_scripts', __NAMESPACE__.'\same_category_posts_styles' );
+add_action( 'enqueue_block_assets', __NAMESPACE__.'\same_category_posts_styles' );
 
 /**
  * Register our admin scripts
@@ -102,41 +113,6 @@ select[disabled] option {
 add_action( 'admin_print_styles-widgets.php', __NAMESPACE__.'\admin_styles' );
 
 /**
- * Get image size
- *
- * $thumb_w, $thumb_h - the width and height of the thumbnail in the widget settings
- * $image_w,$image_h - the width and height of the actual image being displayed
- *
- * return: an array with the width and height of the element containing the image
- */
-function same_category_posts_get_image_size( $thumb_w,$thumb_h,$image_w,$image_h) {
-	
-	$image_size = array('image_h' => $thumb_h, 'image_w' => $thumb_w, 'marginAttr' => '', 'marginVal' => '');
-	$relation_thumbnail = $thumb_w / $thumb_h;
-	$relation_cropped = $image_w / $image_h;
-	
-	if ($relation_thumbnail < $relation_cropped) {
-		// crop left and right site
-		// thumbnail width/height ration is smaller, need to inflate the height of the image to thumb height
-		// and adjust width to keep aspect ration of image
-		$image_size['image_h'] = $thumb_h;
-		$image_size['image_w'] = $thumb_h / $image_h * $image_w; 
-		$image_size['marginAttr'] = 'margin-left';
-		$image_size['marginVal'] = ($image_size['image_w'] - $thumb_w) / 2;
-	} else {
-		// crop top and bottom
-		// thumbnail width/height ration is bigger, need to inflate the width of the image to thumb width
-		// and adjust height to keep aspect ration of image
-		$image_size['image_w'] = $thumb_w;
-		$image_size['image_h'] = $thumb_w / $image_w * $image_h; 
-		$image_size['marginAttr'] = 'margin-top';
-		$image_size['marginVal'] = ($image_size['image_h'] - $thumb_h) / 2;
-	}
-	
-	return $image_size;
-}
-
-/**
  * Related Posts Widget Class
  *
  * Shows posts from same category with some configurable options
@@ -144,8 +120,12 @@ function same_category_posts_get_image_size( $thumb_w,$thumb_h,$image_w,$image_h
 class Widget extends \WP_Widget {
 
 	function __construct() {
-		$widget_ops = array('classname' => 'same-category-posts', 'description' => __('List posts from same category in sidebar based on shown post\'s category'));
-		parent::__construct('same-category-posts', __('Same Category Posts'), $widget_ops);
+		$widget_ops = array(
+			'show_instance_in_rest' => true,
+			'classname' => 'same-category-posts', 
+			'description' => __('List posts from same category in sidebar based on shown post\'s category', 'same-posts')
+		);
+		parent::__construct('same-category-posts', __('Same Category Posts', 'same-posts'), $widget_ops);
 	}
 	
 	/*
@@ -155,7 +135,10 @@ class Widget extends \WP_Widget {
 		global $post;
 
 		$post_thumbnail_id = get_post_thumbnail_id( $post->ID );
-		if ( ! $post_thumbnail_id && $this->instance['default_thunmbnail'] ) {
+
+		// The typo in the key is original and stays: form() never writes it,
+		// but an instance stored by an older version might.
+		if ( ! $post_thumbnail_id && ! empty( $this->instance['default_thunmbnail'] ) ) {
 			$post_thumbnail_id = $this->instance['default_thunmbnail'];
 		}
 
@@ -168,7 +151,7 @@ class Widget extends \WP_Widget {
 				$thumbSize['crop']   = (bool) get_option( "{$thumb}_crop" );
 			}
 		}
-		if ( $thumbSize['crop'] ) {
+		if ( ! empty( $thumbSize['crop'] ) ) {
 			$thumbSize[0] = $size[0] <= $thumbSize['width'] ? ( $thumbSize['width'] + 1 ) : $size[0];
 			$thumbSize[1] = $size[1] <= $thumbSize['height'] ? ( $thumbSize['height'] + 1 ) : $size[1];
 		}
@@ -180,15 +163,30 @@ class Widget extends \WP_Widget {
 			return $html; // bail out if no full dimensions defined
 		}
 
-		$meta = image_get_intermediate_size($post_thumbnail_id,$size);
+		$meta = image_get_intermediate_size($post_thumbnail_id);
 
-		$post_img = wp_get_attachment_metadata($post_thumbnail_id, $size);
+		$post_img = wp_get_attachment_metadata($post_thumbnail_id);
+
+		if ( empty( $post_img['file'] ) ) {
+			return $html; // No metadata to find the file with.
+		}
+
 		$meta['file'] = basename( $post_img['file'] );
 
 		$origfile = get_attached_file( $post_thumbnail_id, true); // the location of the full file
 		$file =	dirname($origfile) .'/'.$meta['file']; // the location of the file displayed as thumb
-		list( $width, $height ) = getimagesize($file);  // get actual size of the thumb file
-		
+
+		// A deleted or unreadable file makes wp_getimagesize() return false.
+		// Dividing by its dimensions would abort the whole request with a
+		// DivisionByZeroError on PHP 8, so bail out with the unchanged HTML.
+		$dimensions = wp_getimagesize( $file );
+
+		if ( ! $dimensions || empty( $dimensions[0] ) || empty( $dimensions[1] ) ) {
+			return $html;
+		}
+
+		list( $width, $height ) = $dimensions;  // actual size of the thumb file
+
 		if ($width / $height == $this->instance['thumb_w'] / $this->instance['thumb_h']) {
 			// image is same ratio as asked for, nothing to do here as the browser will handle it correctly
 			;
@@ -253,7 +251,7 @@ class Widget extends \WP_Widget {
                 $thumbSize['crop']   = (bool) get_option( "{$thumb}_crop" );
             }
         }
-        if ( $thumbSize['crop'] ) {
+        if ( ! empty( $thumbSize['crop'] ) ) {
             $size[0] = $size[0] <= $thumbSize['width'] ? ( $thumbSize['width'] + 1 ) : $size[0];
             $size[1] = $size[1] <= $thumbSize['height'] ? ( $thumbSize['height'] + 1 ) : $size[1];
         }
@@ -280,9 +278,11 @@ class Widget extends \WP_Widget {
 				has_post_thumbnail() ) {
 			$ret .= '<a ';
 			$use_css_cropping = isset($this->instance['use_css_cropping']) ? "same-category-post-css-cropping" : "";
-			$ret .= 'class="same-category-post-thumbnail ' . $use_css_cropping . '"';
+			$ret .= 'class="same-category-post-thumbnail ' . $use_css_cropping . '" ';
 			$ret .= 'href="' . get_the_permalink() . '" title="' . htmlspecialchars( get_the_title() ) . '">';
-			$ret .= $this->the_post_thumbnail( array($this->instance['thumb_w'],$this->instance['thumb_h']));
+			$thumb_w = isset( $this->instance['thumb_w'] ) ? $this->instance['thumb_w'] : 0;
+			$thumb_h = isset( $this->instance['thumb_h'] ) ? $this->instance['thumb_h'] : 0;
+			$ret .= $this->the_post_thumbnail( array( $thumb_w, $thumb_h ) );
 			$ret .= '</a>';
 		}
 		return $ret;
@@ -294,7 +294,7 @@ class Widget extends \WP_Widget {
 	function excerpt_length_filter( $length ) {
 		return $this->instance["excerpt_length"];
 	}
-	
+
 	/**
 	 * Excerpt more link filter
 	 */
@@ -412,9 +412,6 @@ class Widget extends \WP_Widget {
 			return;
 		}
 
-		global $wp_query;
-		global $post;
-		$post_old = $post; // Save the post object.
 		if ( is_archive() ) {
 			// if archive page
 			$current_post_id = 0;
@@ -422,20 +419,102 @@ class Widget extends \WP_Widget {
 			$current_post_id = get_the_ID();
 		}
 
-		extract( $args );
+		$args = wp_parse_args(
+			$args,
+			array(
+				'before_widget' => '',
+				'after_widget'  => '',
+				'before_title'  => '',
+				'after_title'   => '',
+			)
+		);
+
+		$html = $this->render_html( $instance, $current_post_id, $args['before_title'], $args['after_title'] );
+
+		if ( '' === $html ) {
+			return;
+		}
+
+		echo $args['before_widget'] . $html . $args['after_widget'];
+	}
+
+	/**
+	 * Build the widget's HTML and return it.
+	 *
+	 * The classic widget calls this from widget() and wraps the result in the
+	 * sidebar's before/after args; the block's render callback calls it with its
+	 * own title wrapper. Both therefore share one implementation.
+	 *
+	 * Unlike widget() this does not depend on a running loop: when a post id is
+	 * given the global $post is set from it, so the taxonomy lookups work in the
+	 * block editor's preview request as well. The global is restored on the way
+	 * out.
+	 *
+	 * @param  array           $instance        The widget options.
+	 * @param  int             $current_post_id Id of the post being displayed, 0 on archive pages.
+	 * @param  string          $before_title    Markup opening the title, e.g. '<h2 class="widget-title">'.
+	 * @param  string          $after_title     Markup closing the title.
+	 * @return string                           The HTML, or an empty string when there is nothing to show.
+	 *
+	 * @since 1.2.0
+	 */
+	function render_html( $instance, $current_post_id, $before_title = '', $after_title = '' ) {
+		global $post;
+
+		$post_old = $post; // Save the post object.
+
+		if ( $current_post_id && ( ! $post || (int) $post->ID !== (int) $current_post_id ) ) {
+			$post = get_post( $current_post_id );
+		}
+
+		$html = $post ? $this->build_html( $instance, $current_post_id, $before_title, $after_title ) : '';
+
+		// Both filters have to go, whichever way build_html() left the method:
+		// the excerpt length filter is added with priority 9999 and has to be
+		// removed with the same priority.
+		remove_filter( 'excerpt_length', array( $this, 'excerpt_length_filter' ), 9999 );
+		remove_filter( 'excerpt_more', array( $this, 'excerpt_more_filter' ) );
+
+		$post = $post_old; // Restore the post object.
+
+		return $html;
+	}
+
+	/**
+	 * The body of render_html(): query the posts and build the list.
+	 *
+	 * Kept separate so that render_html() can restore the global post object and
+	 * unhook the excerpt filters on every path, including the early exits here.
+	 * Expects the global $post to be the post whose terms are the basis of the
+	 * query. Do not call directly.
+	 *
+	 * @param  array  $instance        The widget options.
+	 * @param  int    $current_post_id Id of the post being displayed, 0 on archive pages.
+	 * @param  string $before_title    Markup opening the title.
+	 * @param  string $after_title     Markup closing the title.
+	 * @return string                  The HTML, or an empty string when there is nothing to show.
+	 *
+	 * @since 1.2.0
+	 */
+	protected function build_html( $instance, $current_post_id, $before_title, $after_title ) {
+		global $post;
+
+		$html = '';
+
 		$this->instance = $instance;
 
 		$this->initPostTypesAndTaxes($instance);
 
 		// if archive page
-		$include_tax_save = array();
+		$include_tax_save = isset( $instance['include_tax'] ) ? $instance['include_tax'] : array();
 		if( is_archive() ) {
 			$term = get_queried_object();
-			$post_type = get_post_type($term->slag);
-			$include_tax_save = $instance['include_tax'];
+			// Was get_post_type( $term->slag ) -- a typo for slug, and a term
+			// slug is not something get_post_type() can use anyway. The call
+			// therefore always fell back to the global post, which is what
+			// get_post_type() without an argument does, minus the warning.
+			$post_type = get_post_type();
 			$instance['include_tax'] = array( $post_type => $term->taxonomy );
-		} else {
-			$include_tax_save = $instance['include_tax'];
 		}
 
 		$taxonomies     = null;
@@ -458,7 +537,13 @@ class Widget extends \WP_Widget {
 		// Get post taxonomies
 		$categories = null;
 		foreach ($taxes as $tax) {
+			if ( ! isset( $instance['post_types'][$tax]['post_type'] ) ) {
+				continue;
+			}
 			$post_type = $instance['post_types'][$tax]['post_type'];
+			if ( ! isset( $instance['include_tax'][$post_type] ) ) {
+				continue;
+			}
 			if ($tax == $instance['include_tax'][$post_type]) {
 				if ( is_archive() ) {
 					// if archive page
@@ -489,7 +574,7 @@ class Widget extends \WP_Widget {
 		
 		// If the current post has no terms for the selected taxonomy, don't render the widget.
 		if ( empty( $categories ) || is_wp_error( $categories ) ) {
-    	return;
+    	return '';
 		}
 
 		// Excerpt length filter
@@ -551,7 +636,7 @@ class Widget extends \WP_Widget {
 						'operator' => 'IN',
 						);
 				} else {
-					return;
+					return '';
 				}
 
 				// excluded terms
@@ -591,8 +676,6 @@ class Widget extends \WP_Widget {
 
 		if( $my_query->have_posts() )
 		{
-			echo $before_widget;
-
 			// Widget title
 			if( !isset ( $instance["hide_title"] ) ) {
 				if( isset( $instance["separate_categories"] ) && $instance["separate_categories"] ) { 
@@ -617,7 +700,7 @@ class Widget extends \WP_Widget {
 					}
 				} else {
 					// ! Separate categories: echo
-					echo $before_title;
+					$html .= $before_title;
 					if( isset ( $instance["title_link"] ) ) {
 						$linkList = "";
 						foreach($categories as $cat) {
@@ -636,7 +719,7 @@ class Widget extends \WP_Widget {
 							} else 															// no category placeholder is used
 								$linkList = '<a href="' . get_category_link( $categories[0] ) . '">'. $instance['title'] . '</a>';
 						}
-						echo wp_kses_post(apply_filters('widget_title',$linkList));
+						$html .= wp_kses_post(apply_filters('widget_title',$linkList));
 					} else {
 						$categoryNames = "";
 						if ($categories) {
@@ -662,15 +745,15 @@ class Widget extends \WP_Widget {
 							else
 								$categoryNames = $instance['title'];
 						}
-						echo wp_kses_post(apply_filters('widget_title',$categoryNames));
+						$html .= wp_kses_post(apply_filters('widget_title',$categoryNames));
 					}
-					echo $after_title;
+					$html .= $after_title;
 				}
 			}
 			// /Widget title
 			
 			// Post list
-			echo "<ul>\n";
+			$html .= "<ul>\n";
 			while ($my_query->have_posts())
 			{
 				$my_query->the_post();
@@ -680,13 +763,19 @@ class Widget extends \WP_Widget {
 					$object_taxes = get_object_taxonomies( $post, 'objects' );
 					$post_categories = null;
 					foreach ( $object_taxes as $tax ) {
+						if ( ! isset( $instance['post_types'][$tax->name]['post_type'] ) ) {
+							continue;
+						}
 						$post_type = $instance['post_types'][$tax->name]['post_type'];
+						if ( ! isset( $instance['include_tax'][$post_type] ) ) {
+							continue;
+						}
 						if ($tax->name == $instance['include_tax'][$post_type]) {
 							$post_categories = get_the_terms($post->ID,$tax->name);
 							break;
 						}
-					}
-					foreach ($post_categories as $val) {
+					} 
+					foreach ( (array) $post_categories as $val ) {
 						if ( in_array( $val, $categories ) ) {
 							$widgetHTML[$val->name][$post->ID]['itemHTML'] = $this->itemHTML($instance,$current_post_id);
 							$widgetHTML[$val->name][$post->ID]['ID'] = $post->ID;
@@ -694,7 +783,7 @@ class Widget extends \WP_Widget {
 					}
 				} else {
 					// ! Separate categories: get itemHTML and echo
-					echo $this->itemHTML($instance,$current_post_id);
+					$html .= $this->itemHTML($instance,$current_post_id);
 				}
 			} // end while
 
@@ -721,20 +810,16 @@ class Widget extends \WP_Widget {
 						}
 					}
 				if ($haveItemHTML)
-					echo $ret;
+					$html .= $ret;
 				}
 			}
 
-			echo "</ul>\n";
+			$html .= "</ul>\n";
 			// end Post list
 			
-			echo $after_widget;
 		}
 
-		remove_filter( 'excerpt_length',  array( $this,'excerpt_length_filter' ) );
-		remove_filter('excerpt_more', array($this,'excerpt_more_filter'));
-
-		$post = $post_old; // Restore the post object.
+		return $html;
 	}
 
 	/**
@@ -823,29 +908,29 @@ class Widget extends \WP_Widget {
 		$thumbTop             = $instance['thumbTop'];
 		$thumb_w              = $instance['thumb_w'];
 		$thumb_h              = $instance['thumb_h'];
-		$use_css_cropping     = $instance['use_css_cropping'];		
+		$use_css_cropping     = $instance['use_css_cropping'];
 		
 		?>
 		<div class="same-category-widget-cont">
-			<h4 data-panel="title"><?php _e('Title')?></h4>
+			<h4 data-panel="title"><?php _e('Title', 'same-posts')?></h4>
 			<div>
 				<p>
 					<label for="<?php echo $this->get_field_id("title_link"); ?>">
 						<input type="checkbox" class="checkbox" id="<?php echo $this->get_field_id("title_link"); ?>" name="<?php echo $this->get_field_name("title_link"); ?>"<?php checked( (bool) $instance["title_link"], true ); ?> />
-						<?php _e( 'Make widget title link' ); ?>
+						<?php _e( 'Make widget title link', 'same-posts' ); ?>
 					</label>
 				</p>
 				
 				<p>
 					<label for="<?php echo $this->get_field_id("hide_title"); ?>">
 						<input type="checkbox" class="checkbox" id="<?php echo $this->get_field_id("hide_title"); ?>" name="<?php echo $this->get_field_name("hide_title"); ?>"<?php checked( (bool) $instance["hide_title"], true ); ?> />
-						<?php _e( 'Hide title' ); ?>
+						<?php _e( 'Hide title', 'same-posts' ); ?>
 					</label>
 				</p>
 				
 				<p>
 					<label for="<?php echo $this->get_field_id("title"); ?>">
-						<?php _e( 'Title *' ); ?>:
+						<?php _e( 'Title *', 'same-posts' ); ?>:
 						<input 
 							style="width:80%;" 
 							class="widefat" 
@@ -857,7 +942,7 @@ class Widget extends \WP_Widget {
 					</label>
 				</p>
 			</div>
-			<h4 data-panel="filter"><?php _e('Filter')?></h4>
+			<h4 data-panel="filter"><?php _e('Filter', 'same-posts')?></h4>
 			<div>
 				<?php	
 					// get taxonomies except for the built-in
@@ -899,7 +984,7 @@ class Widget extends \WP_Widget {
 										id="<?php echo $this->get_field_id( $taxname ); ?>" 
 										value="<?php echo $taxname ?>"
 										<?php checked( (bool) ($instance['include_tax'][$post_type] == $taxname), true ); ?> />
-									<?php printf( __( 'Same "%s" and exclude:' ), esc_html($tax->labels->name)); ?>
+									<?php printf( __( 'Same "%s" and exclude:', 'same-posts' ), esc_html($tax->labels->name)); ?>
 								</label>
 							</p>
 							<?php
@@ -936,13 +1021,13 @@ class Widget extends \WP_Widget {
 								id="<?php echo $this->get_field_id("exclude_no_children"); ?>" 
 								name="<?php echo $this->get_field_name("exclude_no_children"); ?>"
 								<?php checked( (bool) $instance["exclude_no_children"], true ); ?> />
-									<?php _e( 'Perform the exclusion without children' ); ?>
+									<?php _e( 'Perform the exclusion without children', 'same-posts' ); ?>
 						</label>
 					</p>
 
 				<p>
 					<label for="<?php echo $this->get_field_id("sort_by"); ?>">
-						<?php _e('Sort by'); ?>:
+						<?php _e('Sort by', 'same-posts'); ?>:
 						<select id="<?php echo $this->get_field_id("sort_by"); ?>" name="<?php echo $this->get_field_name("sort_by"); ?>">
 							<option value="date"<?php selected( $instance["sort_by"], "date" ); ?>>Date</option>
 							<option value="title"<?php selected( $instance["sort_by"], "title" ); ?>>Title</option>
@@ -958,27 +1043,27 @@ class Widget extends \WP_Widget {
 							id="<?php echo $this->get_field_id("asc_sort_order"); ?>" 
 							name="<?php echo $this->get_field_name("asc_sort_order"); ?>"
 							<?php checked( (bool) $instance["asc_sort_order"], true ); ?> />
-								<?php _e( 'Reverse sort order (ascending)' ); ?>
+								<?php _e( 'Reverse sort order (ascending)', 'same-posts' ); ?>
 					</label>
 				</p>
 				
 				<p>
 					<label for="<?php echo $this->get_field_id("separate_categories"); ?>">
 						<input onchange="javascript:scpwp_namespace.toggleSeparateCategoriesPanel(this)" type="checkbox" class="checkbox" id="<?php echo $this->get_field_id("separate_categories"); ?>" name="<?php echo $this->get_field_name("separate_categories"); ?>"<?php checked( (bool) $instance["separate_categories"], true ); ?> />
-						<?php _e( 'Separate terms (If more than one assigned)' ); ?>
+						<?php _e( 'Separate terms (If more than one assigned)', 'same-posts' ); ?>
 					</label>
 				</p>
 
 				<p class="scpwp-separate-categories-panel" style="border-left:5px solid #F1F1F1;padding-left:10px;display:<?php echo (isset($separate_categories) && $separate_categories) ? 'block' : 'none'?>">
 					<label for="<?php echo $this->get_field_id("num_per_cate"); ?>">
-						<?php _e('Max. number of posts per separated categories'); ?>:
+						<?php _e('Max. number of posts per separated categories', 'same-posts'); ?>:
 						<input style="width: 30%; text-align: center;" id="<?php echo $this->get_field_id("num_per_cate"); ?>" name="<?php echo $this->get_field_name("num_per_cate"); ?>" type="number" min="0" value="<?php echo absint($instance["num_per_cate"]); ?>" size='3' />
 					</label>
 				</p>
 				
 				<p>
 					<label for="<?php echo $this->get_field_id("num"); ?>">
-						<?php _e('Number of posts to show (overall)'); ?>:
+						<?php _e('Number of posts to show (overall)', 'same-posts'); ?>:
 						<input style="width:30%;" style="text-align: center;" id="<?php echo $this->get_field_id("num"); ?>" name="<?php echo $this->get_field_name("num"); ?>" type="number" min="0" value="<?php echo absint($instance["num"]); ?>" size='3' />
 					</label>
 				</p>
@@ -986,14 +1071,14 @@ class Widget extends \WP_Widget {
 				<p>
 					<label for="<?php echo $this->get_field_id("exclude_current_post"); ?>">
 						<input type="checkbox" class="checkbox" id="<?php echo $this->get_field_id("exclude_current_post"); ?>" name="<?php echo $this->get_field_name("exclude_current_post"); ?>"<?php checked( (bool) $instance["exclude_current_post"], true ); ?> />
-						<?php _e( 'Exclude current post' ); ?>
+						<?php _e( 'Exclude current post', 'same-posts' ); ?>
 					</label>
 				</p>
 
 				<p>
 					<label for="<?php echo $this->get_field_id("exclude_sticky_posts"); ?>">
 						<input type="checkbox" class="checkbox" id="<?php echo $this->get_field_id("exclude_sticky_posts"); ?>" name="<?php echo $this->get_field_name("exclude_sticky_posts"); ?>"<?php checked( (bool) $instance["exclude_sticky_posts"], true ); ?> />
-						<?php _e( 'Exclude sticky posts' ); ?>
+						<?php _e( 'Exclude sticky posts', 'same-posts' ); ?>
 					</label>
 				</p>
 
@@ -1003,12 +1088,12 @@ class Widget extends \WP_Widget {
 							id="<?php echo $this->get_field_id("exclude_children"); ?>" 
 							name="<?php echo $this->get_field_name("exclude_children"); ?>"
 							<?php checked( (bool) $instance["exclude_children"], true ); ?> />
-								<?php _e( 'Exclude  children' ); ?>
+								<?php _e( 'Exclude  children', 'same-posts' ); ?>
 					</label>
 				</p>
 
 			</div>
-			<h4 data-panel="thumbnails"><?php _e('Thumbnails')?></h4>
+			<h4 data-panel="thumbnails"><?php _e('Thumbnails', 'same-posts')?></h4>
 			<div>
 				<?php 
 					if ( function_exists('the_post_thumbnail') && current_theme_supports("post-thumbnails") ) : 
@@ -1016,7 +1101,7 @@ class Widget extends \WP_Widget {
 					<p>
 						<label for="<?php echo $this->get_field_id("thumb"); ?>">
 							<input onchange="javascript:scpwp_namespace.toggleShowPostThumbnailPanel(this)" type="checkbox" class="checkbox" id="<?php echo $this->get_field_id("thumb"); ?>" name="<?php echo $this->get_field_name("thumb"); ?>"<?php checked( (bool) $instance["thumb"], true ); ?> />
-							<?php _e( 'Show post thumbnail' ); ?>
+							<?php _e( 'Show post thumbnail', 'same-posts' ); ?>
 						</label>
 					</p>
 					
@@ -1024,13 +1109,13 @@ class Widget extends \WP_Widget {
 						<p>
 							<label for="<?php echo $this->get_field_id("thumbTop"); ?>">
 								<input type="checkbox" class="checkbox" id="<?php echo $this->get_field_id("thumbTop"); ?>" name="<?php echo $this->get_field_name("thumbTop"); ?>"<?php checked( (bool) $instance["thumbTop"], true ); ?> />
-								<?php _e( 'Thumbnail to top' ); ?>
+								<?php _e( 'Thumbnail to top', 'same-posts' ); ?>
 							</label>
 						</p>
 
 						<p>
 							<label>
-								<?php _e('Thumbnail dimensions (in pixels)'); ?>:<br />
+								<?php _e('Thumbnail dimensions (in pixels)', 'same-posts'); ?>:<br />
 								<label for="<?php echo $this->get_field_id("thumb_w"); ?>">
 									Width: <input class="widefat" style="width:30%;" type="number" min="1" id="<?php echo $this->get_field_id("thumb_w"); ?>" name="<?php echo $this->get_field_name("thumb_w"); ?>" value="<?php echo $instance["thumb_w"]; ?>" />
 								</label>
@@ -1044,7 +1129,7 @@ class Widget extends \WP_Widget {
 						<p>
 							<label for="<?php echo $this->get_field_id("use_css_cropping"); ?>">
 								<input type="checkbox" class="checkbox" id="<?php echo $this->get_field_id("use_css_cropping"); ?>" name="<?php echo $this->get_field_name("use_css_cropping"); ?>"<?php checked( (bool) $instance["use_css_cropping"], true ); ?> />
-								<?php _e( 'CSS crop to requested size' ); ?>
+								<?php _e( 'CSS crop to requested size', 'same-posts' ); ?>
 							</label>
 						</p>
 					</div>
@@ -1052,42 +1137,42 @@ class Widget extends \WP_Widget {
 					endif; 
 				?>
 			</div>
-			<h4 data-panel="details"><?php _e('Post details')?></h4>
+			<h4 data-panel="details"><?php _e('Post details', 'same-posts')?></h4>
 			<div>
 				<p>
 					<label for="<?php echo $this->get_field_id("excerpt"); ?>">
 						<input onchange="javascript:scpwp_namespace.toggleShowPostExcerptPanel(this)" type="checkbox" class="checkbox" id="<?php echo $this->get_field_id("excerpt"); ?>" name="<?php echo $this->get_field_name("excerpt"); ?>"<?php checked( (bool) $instance["excerpt"], true ); ?> />
-						<?php _e( 'Show post excerpt' ); ?>
+						<?php _e( 'Show post excerpt', 'same-posts' ); ?>
 					</label>
 				</p>
 				
 				<div class="scpwp-show-post-excerpt-panel" style="border-left:5px solid #F1F1F1;padding-left:10px;display:<?php echo (isset($excerpt) && $excerpt) ? 'block' : 'none'?>">
 					<p>
 						<label for="<?php echo $this->get_field_id("excerpt_length"); ?>">
-							<?php _e( 'Excerpt length (in words):' ); ?>
+							<?php _e( 'Excerpt length (in words):', 'same-posts' ); ?>
 						</label>
-						<input style="width:30%; text-align: center;" placeholder="<?php _e('55')?>" type="number" min="0" id="<?php echo $this->get_field_id("excerpt_length"); ?>" name="<?php echo $this->get_field_name("excerpt_length"); ?>" value="<?php echo $instance["excerpt_length"]; ?>" size="3" />
+						<input style="width:30%; text-align: center;" placeholder="<?php _e('55', 'same-posts')?>" type="number" min="0" id="<?php echo $this->get_field_id("excerpt_length"); ?>" name="<?php echo $this->get_field_name("excerpt_length"); ?>" value="<?php echo $instance["excerpt_length"]; ?>" size="3" />
 					</p>
 					
 					<p>
 						<label for="<?php echo $this->get_field_id("excerpt_more_text"); ?>">
-							<?php _e( 'Excerpt \'more\' text:' ); ?>
+							<?php _e( 'Excerpt \'more\' text:', 'same-posts' ); ?>
 						</label>
-						<input class="widefat" style="width:50%;" placeholder="<?php _e('... more')?>" id="<?php echo $this->get_field_id("excerpt_more_text"); ?>" name="<?php echo $this->get_field_name("excerpt_more_text"); ?>" type="text" value="<?php echo esc_attr($instance["excerpt_more_text"]); ?>" />
+						<input class="widefat" style="width:50%;" placeholder="<?php _e('... more', 'same-posts')?>" id="<?php echo $this->get_field_id("excerpt_more_text"); ?>" name="<?php echo $this->get_field_name("excerpt_more_text"); ?>" type="text" value="<?php echo esc_attr($instance["excerpt_more_text"]); ?>" />
 					</p>
 				</div>
 				
 				<p>
 					<label for="<?php echo $this->get_field_id("comment_num"); ?>">
 						<input type="checkbox" class="checkbox" id="<?php echo $this->get_field_id("comment_num"); ?>" name="<?php echo $this->get_field_name("comment_num"); ?>"<?php checked( (bool) $instance["comment_num"], true ); ?> />
-						<?php _e( 'Show number of comments' ); ?>
+						<?php _e( 'Show number of comments', 'same-posts' ); ?>
 					</label>
 				</p>
 				
 				<p>
 					<label for="<?php echo $this->get_field_id("date"); ?>" onchange="javascript:scpwp_namespace.toggleDatePanel(this)">
 						<input type="checkbox" class="checkbox" id="<?php echo $this->get_field_id("date"); ?>" name="<?php echo $this->get_field_name("date"); ?>"<?php checked( (bool) $instance["date"], true ); ?> />
-						<?php _e( 'Show post date' ); ?>
+						<?php _e( 'Show post date', 'same-posts' ); ?>
 					</label>
 				</p>
 				<div class="cpwp_ident scpwp-data-panel-date" style="display:<?php echo ((bool) $date) ? 'block' : 'none'?>">
@@ -1116,7 +1201,7 @@ class Widget extends \WP_Widget {
 				<p>
 					<label for="<?php echo $this->get_field_id("author"); ?>">
 						<input type="checkbox" class="checkbox" id="<?php echo $this->get_field_id("author"); ?>" name="<?php echo $this->get_field_name("author"); ?>"<?php checked( (bool) $instance["author"], true ); ?> />
-						<?php _e( 'Show post author' ); ?>
+						<?php _e( 'Show post author', 'same-posts' ); ?>
 					</label>
 				</p>
 			</div>
